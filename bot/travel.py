@@ -6,7 +6,7 @@ from telebot import types
 from database import get_user, get_travel, travel_data, users, get_mercenaries
 from config import PLANET_TYPES, TRAVEL_IMAGES, LOCATIONS
 from states import check_travel_cd
-from events import generate_event
+from events import generate_event, handle_event
 
 def start_travel(bot, msg):
     uid = msg.chat.id
@@ -53,6 +53,55 @@ def show_planet_travel(bot, uid, edit_msg=None):
         bot.edit_message_text(text, uid, edit_msg.message_id, parse_mode="Markdown", reply_markup=markup)
     else:
         bot.send_message(uid, text, parse_mode="Markdown", reply_markup=markup)
+
+def start_space_travel(bot, call):
+    uid = call.message.chat.id
+    user = get_user(uid)
+    travel = get_travel(uid)
+    
+    travel_time = random.randint(15, 30) * 60
+    
+    bot.delete_message(uid, call.message.message_id)
+    
+    travel['type'] = 'space'
+    travel['location'] = None
+    travel['end_time'] = time.time() + travel_time
+    travel['event'] = None
+    travel['in_combat'] = False
+    user['traveling'] = True
+    
+    text = "🌌 *Путешествие по Галактике*\n_Здесь пусто, темно и холодно. Редко встречаются другие флоты, а планеты Внешнего Кольца и вовсе разбросаны за световые годы от Корсата…_"
+    
+    markup = types.InlineKeyboardMarkup()
+    mins = travel_time // 60
+    secs = travel_time % 60
+    markup.add(types.InlineKeyboardButton(f"Осталось путешествовать {mins}м {secs}с", callback_data="travel_timer"))
+    
+    bot.send_message(uid, text, parse_mode="Markdown", reply_markup=markup)
+    
+    thread = threading.Thread(target=space_travel_thread, args=(bot, uid, travel_time))
+    thread.daemon = True
+    thread.start()
+
+def space_travel_thread(bot, uid, duration):
+    user = get_user(uid)
+    travel = get_travel(uid)
+    
+    time.sleep(duration * 0.4)
+    
+    if travel['in_combat'] or not user['traveling']:
+        return
+    
+    event = generate_event("Космос", 0)
+    if event and event['type'] != 'nothing':
+        from events import handle_event
+        handle_event(bot, uid, event)
+        return
+    
+    time.sleep(duration * 0.6)
+    
+    if not travel['in_combat'] and user['traveling']:
+        finish_travel(uid, bot)
 
 def start_location_travel(bot, call, loc_index):
     uid = call.message.chat.id
@@ -105,7 +154,7 @@ def travel_thread(bot, uid, duration, loc_index):
     user = get_user(uid)
     travel = get_travel(uid)
     
-    time.sleep(duration * 0.3)  # 30% времени путешествия
+    time.sleep(duration * 0.3)
     
     if travel['in_combat'] or not user['traveling']:
         return
@@ -119,7 +168,7 @@ def travel_thread(bot, uid, duration, loc_index):
             handle_event(bot, uid, event)
             return
     
-    time.sleep(duration * 0.7)  # Оставшееся время
+    time.sleep(duration * 0.7)
     
     if not travel['in_combat'] and user['traveling']:
         finish_travel(uid, bot)
@@ -132,17 +181,16 @@ def finish_travel(uid, bot):
         return
     
     user['traveling'] = False
-    user['travel_cd'] = time.time() + 899  # 14м 59с
+    user['travel_cd'] = time.time() + 899
     
-    exp_min = [23, 29, 39][travel.get('location', 0)]
-    exp_max = [34, 41, 52][travel.get('location', 0)]
-    exp_gain = random.randint(exp_min, exp_max)
-    
-    user['exp'] += exp_gain
-    check_level_up(user)
-    
-    coin_gain = random.randint(10, 30)
-    user['coins'] += coin_gain
+    if travel['type'] == 'space':
+        exp_gain = random.randint(50, 80)
+        coin_gain = random.randint(30, 60)
+    else:
+        exp_min = [23, 29, 39][travel.get('location', 0)]
+        exp_max = [34, 41, 52][travel.get('location', 0)]
+        exp_gain = random.randint(exp_min, exp_max)
+        coin_gain = random.randint(10, 30)
     
     if travel['in_combat']:
         combat_result = travel.get('combat_data', {}).get('result')
@@ -153,11 +201,20 @@ def finish_travel(uid, bot):
             exp_gain = int(exp_gain * 0.3)
             coin_gain = int(coin_gain * 0.5)
     
+    user['exp'] += exp_gain
+    check_level_up(user)
+    user['coins'] += coin_gain
+    
     if bot:
-        status = "📯 Картель остался цел. Все наемники живы." if travel.get('combat_data', {}).get('player_losses', 0) == 0 else f"💀 Потеряно {travel['combat_data'].get('player_losses', 0)} наемников."
+        if travel.get('combat_data', {}).get('player_losses', 0) > 0:
+            status = f"💀 Потеряно {travel['combat_data'].get('player_losses', 0)} наемников."
+        else:
+            status = "📯 Картель остался цел. Все наемники живы."
+        
+        travel_type = "🌌" if travel['type'] == 'space' else "🏜️"
         
         text = (
-            f"🏜️ *Твой картель вернулся на базу!*\n\n"
+            f"{travel_type} *Твой картель вернулся на базу!*\n\n"
             f"+ 💰 {coin_gain} *кредитов*\n"
             f"+ 🌟 {exp_gain} *опыта*\n\n"
             f"{status}\n"
@@ -179,6 +236,12 @@ def check_level_up(user):
         user['exp'] -= user['max_exp']
         user['max_exp'] = int(user['max_exp'] * 1.5)
         user['coins'] += user['level'] * 100
+        
+        if user['level'] == 10:
+            user['coins'] += 500
+        
+        if user['level'] == 25:
+            user['coins'] += 1500
 
 def handle_travel_callback(bot, call):
     uid = call.message.chat.id
@@ -189,7 +252,7 @@ def handle_travel_callback(bot, call):
     elif data == "travel_space":
         user = get_user(uid)
         if user['level'] >= 10:
-            bot.send_message(uid, "🌌 *Путешествие по Галактике*\n_Здесь пусто, темно и холодно. Редко встречаются другие флоты, а планеты Внешнего Кольца и вовсе разбросаны за световые годы от Корсата…_", parse_mode="Markdown")
+            start_space_travel(bot, call)
         else:
             bot.answer_callback_query(call.id, "📯 *Доступно с 10 уровня*", show_alert=True)
     elif data == "travel_back":
